@@ -4,15 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-type work int
+// work is int32, not int, so its increment can go through sync/atomic:
+// Manager runs multiple Do() goroutines against the same Worker concurrently.
+type work int32
 
 func (w *work) Do(v interface{}) interface{} {
 	fmt.Printf("-->%#v\n%#v\n", w, v)
-	*w++
+	atomic.AddInt32((*int32)(w), 1)
 	return nil
 }
 
@@ -37,11 +40,11 @@ func TestQueuManager(t *testing.T) {
 	}
 }
 
-type slow int
+type slow int32
 
 func (w *slow) Do(v interface{}) interface{} {
 	time.Sleep(500 * time.Millisecond)
-	*w++
+	atomic.AddInt32((*int32)(w), 1)
 	fmt.Println(w, v)
 	return nil
 }
@@ -124,5 +127,55 @@ func TestQueuManagerWhenWorkerHasError(t *testing.T) {
 
 	for err := range m.Response() {
 		fmt.Println("---->", err)
+	}
+}
+
+func TestQueuManagerResponseClosesWhenContextCancelledBeforeAllItemsProcessed(t *testing.T) {
+	items := make([]int, 30)
+	s := mySimpler{i: items}
+
+	var w work
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled before Do() ever starts, so every item should be skipped
+
+	m := NewManager(ctx, &w, s)
+	go m.Do()
+
+	select {
+	case <-m.End():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Manager did not end after context cancellation")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for range m.Response() {
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Response channel was never closed after context cancellation")
+	}
+}
+
+func TestQueuManagerCountsEveryItemUnderConcurrentWorkers(t *testing.T) {
+	const total = 200
+	s := mySimpler{i: make([]int, total)}
+
+	var w work
+	ctx := context.Background()
+	m := NewManager(ctx, &w, s)
+
+	for i := 0; i < 20; i++ {
+		go m.Do()
+	}
+
+	<-m.End()
+
+	if int(w) != total {
+		t.Errorf("expected %d, got %d (lost increments under concurrent Do calls)", total, w)
 	}
 }

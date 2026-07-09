@@ -37,15 +37,15 @@ func NewManager(ctx context.Context, w Worker, s Simpler) *Manager {
 }
 
 func (m *Manager) Do() {
-	ch := make(chan interface{}, 1)
 	for x := range m.q.Pop() {
 		select {
-		case ch <- x:
-			m.chv <- m.w.Do(<-ch)
-			m.count <- struct{}{}
 		case <-m.ctx.Done():
-			m.notify <- struct{}{}
+			// Drop the item instead of processing it, but still count it so
+			// counting() reaches total and closes chv/sends notify exactly once.
+		default:
+			m.chv <- m.w.Do(x)
 		}
+		m.count <- struct{}{}
 	}
 }
 
